@@ -6,7 +6,7 @@ from typing import Annotated, Any, NotRequired, TypedDict, Unpack, cast
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig
-from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
+from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelRequest, ModelResponse
 from langchain.chat_models import init_chat_model
 from langchain.tools import BaseTool, ToolRuntime
 from langchain_core.language_models import BaseChatModel
@@ -112,6 +112,13 @@ class CompiledSubAgent(TypedDict):
 
 DEFAULT_SUBAGENT_PROMPT = "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
+
+class _SubAgentAssetState(AgentState):
+    """Extended agent state that includes asset names passed from the parent via the task tool."""
+
+    asset_name: list[str]
+
+
 # State keys that are excluded when passing state to subagents and when returning
 # updates from subagents.
 #
@@ -124,7 +131,7 @@ DEFAULT_SUBAGENT_PROMPT = "In order to complete the objective that the user asks
 #    be explicitly filtered from runtime.state when invoking a subagent to prevent parent state
 #    from leaking to child agents (e.g., the general-purpose subagent loads its own skills via
 #    SkillsMiddleware).
-_EXCLUDED_STATE_KEYS = {"messages", "todos", "structured_response", "skills_metadata", "memory_contents"}
+_EXCLUDED_STATE_KEYS = {"messages", "todos", "structured_response", "skills_metadata", "memory_contents", "asset_name"}
 
 TASK_TOOL_DESCRIPTION = """Launch an ephemeral subagent to handle complex, multi-step independent tasks with isolated context windows.
 
@@ -141,6 +148,7 @@ When using the Task tool, you must specify a subagent_type parameter to select w
 5. Clearly tell the agent whether you expect it to create content, perform analysis, or just do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 7. When only the general-purpose agent is provided, you should use it for all tasks. It is great for isolating context and token usage, and completing specific, complex tasks, as it has all the same capabilities as the main agent.
+8. You can optionally pass `asset_name` — a list of file or resource names (e.g., `["report.pdf", "data.csv"]`) — to provide the subagent with the names of relevant assets it should work with. The subagent can access these names via its state.
 
 ### Example usage of the general-purpose agent:
 
@@ -158,6 +166,15 @@ The research of each individual player is not dependent on the research of the o
 The assistant uses the task tool to break down the complex objective into three isolated tasks.
 Each research task only needs to worry about context and tokens about one player, then returns synthesized information about each player as the Tool Result.
 This means each research task can dive deep and spend tokens and context deeply researching each player, but the final result is synthesized information, and saves us tokens in the long run when comparing the players to each other.
+</commentary>
+</example>
+
+<example>
+User: "Summarize the key findings from report.pdf and data.csv"
+Assistant: *Uses the task tool with asset_name=["report.pdf", "data.csv"] to launch a subagent that can work with these specific files*
+Assistant: *Receives the summary and presents it to the User*
+<commentary>
+The assistant passes the file names via asset_name so the subagent knows exactly which assets to work with. This is useful when the subagent needs to know which files or resources are relevant to its task.
 </commentary>
 </example>
 
@@ -246,6 +263,7 @@ When to use the task tool:
 - When a task requires focused reasoning or heavy token/context usage that would bloat the orchestrator thread
 - When sandboxing improves reliability (e.g. code execution, structured searches, data formatting)
 - When you only care about the output of the subagent, and not the intermediate steps (ex. performing a lot of research and then returned a synthesized report, performing a series of computations or lookups to achieve a concise, relevant answer.)
+- When delegating a task that involves specific files or resources, pass their names via the `asset_name` parameter so the subagent knows which assets to work with
 
 Subagent lifecycle:
 1. **Spawn** → Provide clear role, instructions, and expected output
@@ -322,6 +340,7 @@ def _get_subagents_legacy(
             system_prompt=DEFAULT_SUBAGENT_PROMPT,
             tools=default_tools,
             middleware=general_purpose_middleware,
+            state_schema=_SubAgentAssetState,
             name="general-purpose",
         )
         specs.append(
@@ -363,6 +382,7 @@ def _get_subagents_legacy(
                     system_prompt=agent_["system_prompt"],
                     tools=_tools,
                     middleware=_middleware,
+                    state_schema=_SubAgentAssetState,
                     name=agent_["name"],
                 ),
             }
@@ -419,12 +439,16 @@ def _build_task_tool(
             }
         )
 
-    def _validate_and_prepare_state(subagent_type: str, description: str, runtime: ToolRuntime) -> tuple[Runnable, dict]:
+    def _validate_and_prepare_state(
+        subagent_type: str, description: str, asset_name: list[str] | None, runtime: ToolRuntime
+    ) -> tuple[Runnable, dict]:
         """Prepare state for invocation."""
         subagent = subagent_graphs[subagent_type]
         # Create a new state dict to avoid mutating the original
         subagent_state = {k: v for k, v in runtime.state.items() if k not in _EXCLUDED_STATE_KEYS}
         subagent_state["messages"] = [HumanMessage(content=description)]
+        if asset_name is not None:
+            subagent_state["asset_name"] = asset_name
         return subagent, subagent_state
 
     def task(
@@ -433,12 +457,17 @@ def _build_task_tool(
             "A detailed description of the task for the subagent to perform autonomously. Include all necessary context and specify the expected output format.",  # noqa: E501
         ],
         subagent_type: Annotated[str, "The type of subagent to use. Must be one of the available agent types listed in the tool description."],
+        asset_name: Annotated[
+            list[str] | None,
+            "Optional list of file or resource names (e.g., ['report.pdf', 'data.csv']) relevant to the task. The subagent can access these via its state.",  # noqa: E501
+        ] = None,
+        *,
         runtime: ToolRuntime,
     ) -> str | Command:
         if subagent_type not in subagent_graphs:
             allowed_types = ", ".join([f"`{k}`" for k in subagent_graphs])
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
-        subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
+        subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, asset_name, runtime)
         result = subagent.invoke(subagent_state)
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
@@ -451,12 +480,17 @@ def _build_task_tool(
             "A detailed description of the task for the subagent to perform autonomously. Include all necessary context and specify the expected output format.",  # noqa: E501
         ],
         subagent_type: Annotated[str, "The type of subagent to use. Must be one of the available agent types listed in the tool description."],
+        asset_name: Annotated[
+            list[str] | None,
+            "Optional list of file or resource names (e.g., ['report.pdf', 'data.csv']) relevant to the task. The subagent can access these via its state.",  # noqa: E501
+        ] = None,
+        *,
         runtime: ToolRuntime,
     ) -> str | Command:
         if subagent_type not in subagent_graphs:
             allowed_types = ", ".join([f"`{k}`" for k in subagent_graphs])
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
-        subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
+        subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, asset_name, runtime)
         result = await subagent.ainvoke(subagent_state)
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
@@ -662,6 +696,7 @@ class SubAgentMiddleware(AgentMiddleware):
                         system_prompt=spec["system_prompt"],
                         tools=spec["tools"],
                         middleware=middleware,
+                        state_schema=_SubAgentAssetState,
                         name=spec["name"],
                     ),
                 }

@@ -1551,6 +1551,283 @@ class TestSubAgents:
         assert "skills_metadata" not in subagent_state, "Subagent without skills parameter should NOT have skills_metadata"
 
 
+class TestAssetName:
+    """Tests for the asset_name parameter on the task tool."""
+
+    def test_asset_name_passed_to_spec_based_subagent_state(self) -> None:
+        """Test that asset_name provided in the task tool call is available in the subagent's runtime.state.
+
+        This verifies the end-to-end flow:
+        1. Parent agent calls task tool with asset_name=["report.pdf", "data.csv"]
+        2. SubAgent (spec-based) receives asset_name in runtime.state
+        3. The subagent's tool can access runtime.state["asset_name"]
+        """
+        captured_subagent_states: list[dict[str, Any]] = []
+
+        @tool
+        def capture_subagent_state(query: str, runtime: ToolRuntime) -> str:
+            """Captures runtime state from the subagent."""
+            captured_subagent_states.append(dict(runtime.state))
+            return f"Processed: {query}"
+
+        custom_subagent_model = GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "capture_subagent_state",
+                                "args": {"query": "check state"},
+                                "id": "call_capture",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="Subagent done."),
+                ]
+            )
+        )
+
+        leader_model = GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "task",
+                                "args": {
+                                    "description": "Process these files",
+                                    "subagent_type": "file-processor",
+                                    "asset_name": ["report.pdf", "data.csv"],
+                                },
+                                "id": "call_task",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="Done."),
+                ]
+            )
+        )
+
+        leader = create_deep_agent(
+            model=leader_model,
+            checkpointer=InMemorySaver(),
+            subagents=[
+                SubAgent(
+                    name="file-processor",
+                    description="Processes files",
+                    system_prompt="You process files.",
+                    model=custom_subagent_model,
+                    tools=[capture_subagent_state],
+                )
+            ],
+        )
+
+        leader.invoke(
+            {"messages": [HumanMessage(content="Process reports")]},
+            config={"configurable": {"thread_id": "test_asset_name_spec"}},
+        )
+
+        assert len(captured_subagent_states) > 0, "Subagent tool should have been invoked"
+        subagent_state = captured_subagent_states[0]
+        assert "asset_name" in subagent_state, "asset_name should be present in subagent runtime.state"
+        assert subagent_state["asset_name"] == ["report.pdf", "data.csv"]
+
+    def test_task_tool_works_without_asset_name(self) -> None:
+        """Test backward compatibility: task tool works when asset_name is not provided.
+
+        This ensures the existing behavior is preserved — task tool calls that
+        don't include asset_name continue to work correctly.
+        """
+        parent_chat_model = GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "task",
+                                "args": {
+                                    "description": "Calculate the sum of 2 and 3",
+                                    "subagent_type": "general-purpose",
+                                },
+                                "id": "call_calculate_sum",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="The calculation has been completed."),
+                ]
+            )
+        )
+
+        subagent_chat_model = GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(content="The sum of 2 and 3 is 5."),
+                ]
+            )
+        )
+
+        compiled_subagent = create_agent(model=subagent_chat_model)
+
+        parent_agent = create_deep_agent(
+            model=parent_chat_model,
+            checkpointer=InMemorySaver(),
+            name="parent",
+            subagents=[CompiledSubAgent(name="general-purpose", description="General purpose.", runnable=compiled_subagent)],
+        )
+
+        result = parent_agent.invoke(
+            {"messages": [HumanMessage(content="Add 2 + 3")]},
+            config={"configurable": {"thread_id": "test_no_asset_name"}},
+        )
+
+        messages = result["messages"]
+        assert any("5" in msg.content for msg in messages if hasattr(msg, "content") and isinstance(msg.content, str))
+
+    def test_asset_name_passed_to_compiled_subagent(self) -> None:
+        """Test that asset_name is passed to a CompiledSubAgent that has asset_name in its state schema.
+
+        CompiledSubAgent users are responsible for including asset_name in their state schema
+        if they want to use it.
+        """
+        from langchain.agents.middleware.types import AgentState
+
+        from deepagents.middleware.subagents import _SubAgentAssetState
+
+        captured_states: list[dict[str, Any]] = []
+
+        @tool
+        def capture_state(query: str, runtime: ToolRuntime) -> str:
+            """Captures runtime state."""
+            captured_states.append(dict(runtime.state))
+            return f"Done: {query}"
+
+        subagent_model = GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "capture_state",
+                                "args": {"query": "check"},
+                                "id": "call_cap",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="Compiled subagent done."),
+                ]
+            )
+        )
+
+        compiled_subagent = create_agent(
+            model=subagent_model,
+            tools=[capture_state],
+            state_schema=_SubAgentAssetState,
+            name="asset-agent",
+        )
+
+        leader_model = GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "task",
+                                "args": {
+                                    "description": "Work with assets",
+                                    "subagent_type": "asset-agent",
+                                    "asset_name": ["doc1.pdf", "doc2.pdf"],
+                                },
+                                "id": "call_compiled",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="Done."),
+                ]
+            )
+        )
+
+        leader = create_deep_agent(
+            model=leader_model,
+            checkpointer=InMemorySaver(),
+            name="parent",
+            subagents=[
+                CompiledSubAgent(
+                    name="asset-agent",
+                    description="Works with assets.",
+                    runnable=compiled_subagent,
+                )
+            ],
+        )
+
+        leader.invoke(
+            {"messages": [HumanMessage(content="Process docs")]},
+            config={"configurable": {"thread_id": "test_asset_compiled"}},
+        )
+
+        assert len(captured_states) > 0, "Compiled subagent tool should have been invoked"
+        assert "asset_name" in captured_states[0], "asset_name should be in compiled subagent state"
+        assert captured_states[0]["asset_name"] == ["doc1.pdf", "doc2.pdf"]
+
+    def test_asset_name_not_bubbled_to_parent(self) -> None:
+        """Test that asset_name from subagent state does not bubble back to the parent.
+
+        asset_name is in _EXCLUDED_STATE_KEYS, so it should be filtered out
+        when returning state updates from the subagent.
+        """
+        parent_chat_model = GenericFakeChatModel(
+            messages=iter(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "task",
+                                "args": {
+                                    "description": "Process files",
+                                    "subagent_type": "general-purpose",
+                                    "asset_name": ["test.pdf"],
+                                },
+                                "id": "call_asset",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="Done."),
+                ]
+            )
+        )
+
+        subagent_model = GenericFakeChatModel(
+            messages=iter([AIMessage(content="Processed.")])
+        )
+
+        compiled_subagent = create_agent(model=subagent_model)
+
+        parent = create_deep_agent(
+            model=parent_chat_model,
+            checkpointer=InMemorySaver(),
+            name="parent",
+            subagents=[CompiledSubAgent(name="general-purpose", description="GP.", runnable=compiled_subagent)],
+        )
+
+        result = parent.invoke(
+            {"messages": [HumanMessage(content="Go")]},
+            config={"configurable": {"thread_id": "test_no_bubble"}},
+        )
+
+        assert "asset_name" not in result, "asset_name should not bubble back to parent state"
+
+
 class TestSubAgentMiddlewareValidation:
     """Tests for SubAgentMiddleware initialization validation."""
 
