@@ -167,6 +167,16 @@ class TestDeepAgents:
         structured_output = response["structured_response"]
         assert len(structured_output.pokemon) == 3
 
+    def test_deep_agent_with_state_schema(self):
+        from langchain.agents.middleware.types import AgentState
+
+        class CustomState(AgentState):
+            custom_field: str
+
+        agent = create_deep_agent(state_schema=CustomState)
+        assert_all_deepagent_qualities(agent)
+        assert "custom_field" in agent.stream_channels
+
     async def test_with_memory_middleware(self):
         store = InMemoryStore()
         now = datetime.now(UTC).isoformat()
