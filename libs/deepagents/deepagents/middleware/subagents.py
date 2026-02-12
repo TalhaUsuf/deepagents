@@ -148,7 +148,7 @@ When using the Task tool, you must specify a subagent_type parameter to select w
 5. Clearly tell the agent whether you expect it to create content, perform analysis, or just do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 7. When only the general-purpose agent is provided, you should use it for all tasks. It is great for isolating context and token usage, and completing specific, complex tasks, as it has all the same capabilities as the main agent.
-8. You can optionally pass `asset_name` — a list of file or resource names (e.g., `["report.pdf", "data.csv"]`) — to provide the subagent with the names of relevant assets it should work with. The subagent can access these names via its state.
+8. When project assets are listed in your system prompt, use `asset_name` to pass only the relevant files/resources to each subagent. Select assets by matching the user's query and full conversation history against asset descriptions. Different subagent calls may need different asset subsets — route thoughtfully. Do not pass the entire asset catalog to every subagent.
 
 ### Example usage of the general-purpose agent:
 
@@ -170,11 +170,15 @@ This means each research task can dive deep and spend tokens and context deeply 
 </example>
 
 <example>
-User: "Summarize the key findings from report.pdf and data.csv"
-Assistant: *Uses the task tool with asset_name=["report.pdf", "data.csv"] to launch a subagent that can work with these specific files*
-Assistant: *Receives the summary and presents it to the User*
+User: "Tell me about Sarah O'Brien"
+System has project assets: bank.pdf (bank overview), commerce.pdf (commerce data), employees.csv (employee directory), travel.pdf (travel records)
+Available subagents: pdf-subagent, csv-subagent
+Assistant: *Calls task tool twice in parallel:*
+  1. task(subagent_type="csv-subagent", asset_name=["employees.csv"], description="Look up all information about Sarah O'Brien in the employee directory")
+  2. task(subagent_type="pdf-subagent", asset_name=["bank.pdf"], description="Search for any mentions of Sarah O'Brien in the bank records")
+Assistant: *Synthesizes results from both subagents and presents findings to the user*
 <commentary>
-The assistant passes the file names via asset_name so the subagent knows exactly which assets to work with. This is useful when the subagent needs to know which files or resources are relevant to its task.
+The assistant analyzed the user's query against the project asset catalog. "Sarah O'Brien" likely appears in employee records and bank documents, but is unlikely to be in commerce or travel data. The assistant selected only the relevant assets for each subagent type, launching both in parallel.
 </commentary>
 </example>
 
@@ -263,7 +267,7 @@ When to use the task tool:
 - When a task requires focused reasoning or heavy token/context usage that would bloat the orchestrator thread
 - When sandboxing improves reliability (e.g. code execution, structured searches, data formatting)
 - When you only care about the output of the subagent, and not the intermediate steps (ex. performing a lot of research and then returned a synthesized report, performing a series of computations or lookups to achieve a concise, relevant answer.)
-- When delegating a task that involves specific files or resources, pass their names via the `asset_name` parameter so the subagent knows which assets to work with
+- When project assets are available, select only the relevant assets for each task based on the user's query and conversation history, then pass them via `asset_name`. Different tasks may need different asset subsets — choose thoughtfully rather than sending all assets to every subagent. In follow-up turns, avoid re-querying assets whose data is already in the conversation.
 
 Subagent lifecycle:
 1. **Spawn** → Provide clear role, instructions, and expected output

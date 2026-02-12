@@ -17,15 +17,53 @@ from deepagents.middleware._utils import append_to_system_message
 
 PROJECT_ASSETS_SYSTEM_PROMPT = """## Project Assets
 
-The following files and resources are available in this project. When delegating tasks to subagents using the `task` tool, select only the assets relevant to the current query and pass their names via the `asset_name` parameter.
+The following files and resources are available in this project:
 
 {assets_list}
 
-When choosing assets for a subagent task:
-- Review the user's current question and the conversation history
-- Select only the assets whose descriptions indicate relevance to the task
-- Pass the selected asset names as `asset_name` in the task tool call
-- Different subagents may need different subsets of assets"""
+### When to delegate to a subagent with assets
+- The user's question requires reading, analyzing, or cross-referencing content from specific files
+- The task involves extracting information that only exists inside the assets, not in the conversation history
+
+### When NOT to delegate
+- You can already answer from information in the conversation (e.g., a previous subagent already returned the relevant data)
+- The user is asking about the asset catalog itself (e.g., "What files do you have?" or "Which assets are CSVs?") — answer directly from this list
+- The task is simple enough to handle without file access
+
+### Asset selection strategy
+- Match the user's query and full conversation history against asset descriptions to identify relevant files
+- Pass only the assets the subagent actually needs — do not send the entire catalog
+- Different subagent types may need different asset subsets — route assets to the appropriate subagent
+- In multi-turn conversations, carry forward context from earlier messages when selecting assets (e.g., if the user asked about "Sarah" earlier and now says "also check the travel records", include travel-related assets for the same person without re-querying assets that already returned results)
+- When a task requires comparing or cross-referencing data within the same subagent's domain, send multiple assets to a single subagent call so it can access all of them together
+
+<examples>
+<example>
+User: "Tell me about Sarah O'Brien"
+Available subagents: pdf-subagent (handles PDFs), csv-subagent (handles CSVs)
+Available assets: bank.pdf (bank overview), commerce.pdf (commerce data), employees.csv (employee directory), travel.pdf (travel records)
+Reasoning: Sarah likely appears in employee records (employees.csv) and may be referenced in bank documents (bank.pdf). Commerce and travel data are unlikely to mention her by name without further context. Route PDF assets to the pdf-subagent and CSV assets to the csv-subagent.
+Action: In parallel — task(subagent_type="pdf-subagent", asset_name=["bank.pdf"], description="Find all information about Sarah O'Brien") AND task(subagent_type="csv-subagent", asset_name=["employees.csv"], description="Look up Sarah O'Brien in the employee directory")
+</example>
+
+<example>
+User (follow-up after receiving Sarah's info): "Now also check if she has any travel records"
+Reasoning: Previous messages already contain Sarah's employee and bank data. Only the travel asset is new. No need to re-query employees.csv or bank.pdf.
+Action: task(subagent_type="pdf-subagent", asset_name=["travel.pdf"], description="Find any travel records for Sarah O'Brien")
+</example>
+
+<example>
+User: "What files are available in this project?"
+Reasoning: This is a question about the asset catalog itself, not about content within the files. Answer directly — no delegation needed.
+Action: Respond directly listing all available assets and their descriptions.
+</example>
+
+<example>
+User: "Compare the bank overview with the commerce summary"
+Reasoning: Both bank.pdf and commerce.pdf are PDFs that belong to the same subagent. Send both to a single call so the subagent can read and compare them side by side.
+Action: task(subagent_type="pdf-subagent", asset_name=["bank.pdf", "commerce.pdf"], description="Compare the key themes and findings between the bank overview and the commerce summary")
+</example>
+</examples>"""
 
 
 class ProjectAsset(TypedDict):
