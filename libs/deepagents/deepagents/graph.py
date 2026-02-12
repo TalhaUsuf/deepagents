@@ -23,6 +23,7 @@ from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.memory import MemoryMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
+from deepagents.middleware.project_assets import ProjectAsset, ProjectAssetsMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from deepagents.middleware.subagents import (
     GENERAL_PURPOSE_SUBAGENT,
@@ -63,6 +64,7 @@ def create_deep_agent(
     store: BaseStore | None = None,
     backend: BackendProtocol | BackendFactory | None = None,
     interrupt_on: dict[str, bool | InterruptOnConfig] | None = None,
+    project_assets: list[ProjectAsset] | None = None,
     debug: bool = False,
     name: str | None = None,
     cache: BaseCache | None = None,
@@ -141,6 +143,22 @@ def create_deep_agent(
             Pass to pause agent execution at specified tool calls for human approval or modification.
 
             Example: `interrupt_on={"edit_file": True}` pauses before every edit.
+        project_assets: Optional list of project asset descriptors.
+
+            Each asset is a dict with ``name`` and ``description`` keys.
+            When provided, all asset descriptions are injected into the system
+            prompt so the agent can select relevant assets when delegating
+            tasks to subagents via the ``asset_name`` parameter on the task tool.
+
+            Example::
+
+                create_deep_agent(
+                    project_assets=[
+                        {"name": "bank.pdf", "description": "Overview of bank services"},
+                        {"name": "employees.csv", "description": "Employee directory"},
+                    ],
+                    subagents=[...],
+                )
         debug: Whether to enable debug mode. Passed through to `create_agent`.
         name: The name of the agent. Passed through to `create_agent`.
         cache: The cache to use for the agent. Passed through to `create_agent`.
@@ -237,6 +255,8 @@ def create_deep_agent(
         deepagent_middleware.append(MemoryMiddleware(backend=backend, sources=memory))
     if skills is not None:
         deepagent_middleware.append(SkillsMiddleware(backend=backend, sources=skills))
+    if project_assets is not None:
+        deepagent_middleware.append(ProjectAssetsMiddleware(assets=project_assets))
     deepagent_middleware.extend(
         [
             FilesystemMiddleware(backend=backend),
